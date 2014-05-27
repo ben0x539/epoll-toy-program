@@ -247,6 +247,7 @@ static void remove_client(my_state* state, client_state* client,
     static const char prefix[] = "\ndisconnecting: ";
     write(client->fd, prefix, sizeof prefix);
     write(client->fd, msg, strlen(msg));
+    write(client->fd, "\n", 1);
   }
 
   shutdown(client->fd, SHUT_RDWR);
@@ -387,7 +388,7 @@ static int on_signal_cb(my_state* state, const char** err) {
 
 static void on_hup_cb(my_state* state, client_state* client) {
   printf("on_hup_cb\n");
-  remove_client(state, client, NULL);
+  remove_client(state, client, "hup");
 }
 
 static void on_err_cb(my_state* state, client_state* client) {
@@ -417,7 +418,7 @@ static void on_read_cb(my_state* state, client_state* client) {
       return;
     }
     if (result == 0) {
-      remove_client(state, client, NULL);
+      remove_client(state, client, "eof");
       return;
     }
     uresult = (unsigned) result;
