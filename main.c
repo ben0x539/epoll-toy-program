@@ -249,6 +249,7 @@ static void remove_client(my_state* state, client_state* client,
     write(client->fd, msg, strlen(msg));
   }
 
+  shutdown(client->fd, SHUT_RDWR);
   close(client->fd);
 
   /* gee, linear search :( */
