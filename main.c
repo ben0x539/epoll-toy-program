@@ -50,7 +50,7 @@ static int setup_signal_fd(const char** err);
 static void remove_client(my_state* state, client_state* client,
                           const char* msg);
 
-static int on_accept_cb(my_state* state, const char** err);
+static void on_accept_cb(my_state* state);
 static int on_signal_cb(my_state* state, const char** err);
 
 static void on_hup_cb(my_state* state, client_state* client);
@@ -140,7 +140,7 @@ static int run_server_loop(my_state* state, const char** err) {
     fd = *(int*) event.data.ptr; /* this is why client_state starts with fd */
 
     if (fd == state->accept_socket) {
-      result = on_accept_cb(state, err);
+      on_accept_cb(state);
     } else if (fd == state->signal_fd) {
       result = on_signal_cb(state, err);
     } else {
@@ -266,7 +266,7 @@ static void remove_client(my_state* state, client_state* client,
   free(client);
 }
 
-static int on_accept_cb(my_state* state, const char** err) {
+static void on_accept_cb(my_state* state) {
   int client_fd;
   int last_errno;
   struct sockaddr_in addr;
@@ -276,6 +276,7 @@ static int on_accept_cb(my_state* state, const char** err) {
   client_state* client;
   size_t cap;
   struct epoll_event event;
+  const char* err;
 
   printf("on_accept_cb\n");
 
@@ -283,25 +284,25 @@ static int on_accept_cb(my_state* state, const char** err) {
   client_fd =
     accept(state->accept_socket, (struct sockaddr*) &addr, &addr_len);
   if (client_fd == -1) {
-    *err = "accept";
+    err = "accept";
     goto close_and_fail;
   }
   flags = fcntl(client_fd, F_GETFL);
   if (flags == -1) {
-    *err = "fcntl (client_fd, F_GETFL)";
+    err = "fcntl (client_fd, F_GETFL)";
     goto close_and_fail;
   }
   if (fcntl(client_fd, F_SETFL, flags | O_NONBLOCK) == -1) {
-    *err = "fcntl (client_fd, F_SETFL, O_NONBLOCK)";
+    err = "fcntl (client_fd, F_SETFL, O_NONBLOCK)";
     goto close_and_fail;
   }
   flags = fcntl(client_fd, F_GETFD);
   if (flags == -1) {
-    *err = "fcntl (client_fd, F_GETFD)";
+    err = "fcntl (client_fd, F_GETFD)";
     goto close_and_fail;
   }
   if (fcntl(client_fd, F_SETFD, flags | FD_CLOEXEC) == -1) {
-    *err = "fcntl (client_fd, F_SETFD, FD_CLOEXEC)";
+    err = "fcntl (client_fd, F_SETFD, FD_CLOEXEC)";
     goto close_and_fail;
   }
 
@@ -314,15 +315,15 @@ static int on_accept_cb(my_state* state, const char** err) {
     assert(cap > state->cap_clients); /* overflow would be bad I guess */
     clients = realloc(state->clients, cap);
     if (clients == NULL) {
-      *err = "realloc (clients)";
+      err = "realloc (clients)";
       goto close_and_fail;
     }
     state->cap_clients = cap;
+    state->clients = clients;
   }
-  state->clients = clients;
   client = malloc(sizeof(client_state));
   if (client == NULL) {
-    *err = "malloc (client)";
+    err = "malloc (client)";
     goto close_and_fail;
   }
   client->fd = client_fd;
@@ -337,15 +338,18 @@ static int on_accept_cb(my_state* state, const char** err) {
     /* ugh */
     free(client);
     state->num_clients--;
+    goto close_and_fail;
   }
 
-  return 0;
+  return;
 
 close_and_fail:
   last_errno = errno;
   close(client_fd);
   errno = last_errno;
-  return -1;
+
+  fprintf(stderr, "ignoring: ");
+  perror(err);
 }
 
 static int on_signal_cb(my_state* state, const char** err) {
