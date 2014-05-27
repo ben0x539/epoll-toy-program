@@ -425,16 +425,16 @@ static void on_read_cb(my_state* state, client_state* client) {
 
     assert(client->rd_len <= sizeof(client->rd_buf));
     p = memchr(client->rd_buf + client->rd_len, '\n', uresult);
+    client->rd_len += uresult;
     if (p) {
+      unsigned line_len = (unsigned) (p - client->rd_buf);
       printf("received from fd %d: %.*s\n",
              client->fd,
-             (int) client->rd_len + (int) uresult - 1,
+             (int) line_len,
              client->rd_buf);
       memcpy(client->rd_buf, p + 1,
-             uresult - (p - client->rd_buf - client->rd_len) - 1);
+             client->rd_len - line_len - 1);
       client->rd_len = 0;
-    } else {
-      client->rd_len += uresult;
     }
   }
 }
