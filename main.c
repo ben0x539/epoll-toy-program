@@ -1,12 +1,14 @@
 #define _POSIX_SOURCE
 
-#include <errno.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <errno.h>
 #include <assert.h>
 
 #include <signal.h>
 
 #include <unistd.h>
+#include <fcntl.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/epoll.h>
@@ -22,6 +24,10 @@ typedef struct my_state {
   int accept_socket;
   int epoll_fd;
   int signal_fd;
+
+  int* clients;
+  size_t num_clients;
+  size_t cap_clients;
 
   int shutdown;
 } my_state;
@@ -48,10 +54,15 @@ int main(int argc, char* argv[]) {
   state.desired_port = 8000;
   state.accept_socket = state.epoll_fd = state.signal_fd = -1;
 
+  state.clients = NULL;
+  state.num_clients = 0;
+  state.cap_clients = 0;
+
   result = run_server_loop(&state, &err);
   maybe_close(&state.accept_socket);
   maybe_close(&state.epoll_fd);
   maybe_close(&state.signal_fd);
+  free(state.clients);
 
   if (result == -1) {
     perror(err);
@@ -188,6 +199,9 @@ static int on_accept_cb(my_state* state, const char** err) {
   int client_fd;
   struct sockaddr_in addr;
   socklen_t addr_len;
+  int flags;
+  int* clients;
+  size_t cap;
 
   printf("on_accept_cb\n");
 
@@ -198,6 +212,41 @@ static int on_accept_cb(my_state* state, const char** err) {
     *err = "accept";
     return -1;
   }
+  flags = fcntl(client_fd, F_GETFL);
+  if (flags == -1) {
+    *err = "fcntl (client_fd, F_GETFL)";
+    return -1;
+  }
+  if (fcntl(client_fd, F_SETFL, flags | O_NONBLOCK) == -1) {
+    *err = "fcntl (client_fd, F_SETFL, O_NONBLOCK)";
+    return -1;
+  }
+  flags = fcntl(client_fd, F_GETFD);
+  if (flags == -1) {
+    *err = "fcntl (client_fd, F_GETFD)";
+    return -1;
+  }
+  if (fcntl(client_fd, F_SETFD, flags | FD_CLOEXEC) == -1) {
+    *err = "fcntl (client_fd, F_SETFD, FD_CLOEXEC)";
+    return -1;
+  }
+
+  cap = state->cap_clients;
+  if (cap == state->num_clients * sizeof(*clients)) {
+    if (cap == 0)
+      cap = sizeof(*clients) * 4;
+    else
+      cap *= 2;
+    assert(cap > state->cap_clients); /* overflow would be bad I guess */
+    clients = realloc(state->clients, cap);
+    if (clients == NULL) {
+      *err = "realloc (clients)";
+      return -1;
+    }
+    state->cap_clients = cap;
+  }
+  clients[state->num_clients++] = client_fd;
+  state->clients = clients;
 
   return 0;
 }
