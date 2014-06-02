@@ -17,7 +17,7 @@
 #include <netinet/in.h>
 #include <netinet/in.h>
 
-#ifdef NDEBUG
+#ifndef DEBUG
    static void ignore_var_args(int i, ...);
 #  define LOG(...) ignore_var_args(0, __VA_ARGS__)
 #else
@@ -297,16 +297,21 @@ static int send_to(my_state* state, client_state* client,
   }
 
   off = client->wr_offset + client->wr_len;
+  if (off > sizeof(client->wr_buf))
+    off -= sizeof(client->wr_buf);
 
   LOG("queueing for fd %d: %d += %d\n", client->fd, (int) client->wr_len, (int) len);
 
   n = sizeof(client->wr_buf) - off;
   if (n >= len + 1) {
+    assert(off + len + 1 <= sizeof(client->wr_buf));
     memcpy(client->wr_buf + off, msg, len);
     client->wr_buf[off + len] = '\n';
   } else {
+    assert(off + n <= sizeof(client->wr_buf));
+    assert(len - n + 1 <= sizeof(client->wr_buf));
     memcpy(client->wr_buf + off, msg, n);
-    memcpy(client->wr_buf, msg, len - n);
+    memcpy(client->wr_buf, msg + n, len - n);
     client->wr_buf[len - n] = '\n';
   }
   client->wr_len += (unsigned) len + 1;
@@ -361,6 +366,7 @@ static int try_write(my_state* state, client_state* client) {
 
   client->wr_len -= (unsigned) result;
   client->wr_offset += (unsigned) result;
+  assert(client->wr_offset <= sizeof(client->wr_buf));
   if (client->wr_offset == sizeof(client->wr_buf))
       client->wr_offset = 0;
 
@@ -589,6 +595,6 @@ static void on_write_cb(my_state* state, client_state* client) {
   }
 }
 
-#ifdef NDEBUG
+#ifndef DEBUG
   static void ignore_var_args(int i, ...) {}
 #endif
