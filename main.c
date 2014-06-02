@@ -20,6 +20,7 @@
 typedef struct client_state {
   int fd; /* ought to be first member */
   unsigned rd_len;
+  unsigned wr_offset;
   unsigned wr_len;
   char rd_buf[512];
   char wr_buf[512*3];
@@ -49,6 +50,10 @@ static int setup_signal_fd(const char** err);
 
 static void remove_client(my_state* state, client_state* client,
                           const char* msg);
+static int send_to(my_state* state, client_state* client,
+                   const char* msg, size_t len);
+static int broadcast_from_rd(my_state* state, client_state* client,
+                             size_t len);
 
 static void on_accept_cb(my_state* state);
 static int on_signal_cb(my_state* state, const char** err);
@@ -107,6 +112,8 @@ static int run_server_loop(my_state* state, const char** err) {
   if ((state->epoll_fd = epoll_create1(EPOLL_CLOEXEC)) == -1) {
     return -1;
   }
+
+  signal(SIGPIPE, SIG_IGN);
 
   event.events = EPOLLIN;
   event.data.ptr = &state->accept_socket;
@@ -239,7 +246,7 @@ static void remove_client(my_state* state, client_state* client,
   size_t i;
 
   if (epoll_ctl(state->epoll_fd, EPOLL_CTL_DEL, client->fd, NULL) == -1) {
-    perror("ignoring: epoll_ctl(... EPOLL_CTL_DEL, client->fd...)\n");
+    perror("ignoring: epoll_ctl (removing client)");
   }
 
   if (msg) {
@@ -265,6 +272,65 @@ static void remove_client(my_state* state, client_state* client,
   --state->num_clients;
 
   free(client);
+}
+
+static int send_to(my_state* state, client_state* client,
+                   const char* msg, size_t len) {
+  char err_buf[256];
+  size_t n;
+  size_t off;
+  struct epoll_event event;
+
+  if (client->wr_len + len + 1 > sizeof(client->wr_buf)) {
+    remove_client(state, client, "write buffer overrun");
+    return -1;
+  }
+
+  event.data.ptr = client;
+  event.events = EPOLLIN | EPOLLRDHUP | EPOLLOUT;
+  if (epoll_ctl(state->epoll_fd, EPOLL_CTL_MOD, client->fd, &event) == -1) {
+    strerror_r(errno, err_buf, sizeof err_buf);
+    remove_client(state, client, err_buf);
+    return -1;
+  }
+
+  off = client->wr_offset + client->wr_len;
+
+  n = sizeof(client->wr_buf) - off;
+  if (n >= len + 1) {
+    memcpy(client->wr_buf + off, msg, len);
+    client->wr_buf[off + len] = '\n';
+  } else {
+    memcpy(client->wr_buf + off, msg, n);
+    memcpy(client->wr_buf, msg, len - n);
+    client->wr_buf[len - n] = '\n';
+  }
+  client->wr_len += (unsigned) len + 1;
+
+  return 0;
+}
+
+static int broadcast_from_rd(my_state* state, client_state* client,
+                             size_t len) {
+  size_t i;
+  int result, client_result;
+  char buf[sizeof(client->rd_buf)];
+  client_state* receiver;
+
+  memcpy(buf, client->rd_buf, len);
+
+  result = 0;
+  for (i = 0; i < state->num_clients; ++i) {
+    receiver = state->clients[i];
+    client_result = send_to(state, receiver, buf, len);
+    if (client_result == -1) {
+      --i;
+      if (receiver == client)
+        result = -1;
+    }
+  }
+
+  return result;
 }
 
 static void on_accept_cb(my_state* state) {
@@ -329,6 +395,7 @@ static void on_accept_cb(my_state* state) {
   }
   client->fd = client_fd;
   client->rd_len = 0;
+  client->wr_offset = 0;
   client->wr_len = 0;
   state->clients[state->num_clients++] = client;
 
@@ -388,7 +455,7 @@ static int on_signal_cb(my_state* state, const char** err) {
 
 static void on_hup_cb(my_state* state, client_state* client) {
   printf("on_hup_cb\n");
-  remove_client(state, client, "hup");
+  remove_client(state, client, NULL);
 }
 
 static void on_err_cb(my_state* state, client_state* client) {
@@ -432,6 +499,8 @@ static void on_read_cb(my_state* state, client_state* client) {
              client->fd,
              (int) line_len,
              client->rd_buf);
+      if (broadcast_from_rd(state, client, line_len) == -1)
+        return;
       memcpy(client->rd_buf, p + 1,
              client->rd_len - line_len - 1);
       client->rd_len = 0;
@@ -440,5 +509,41 @@ static void on_read_cb(my_state* state, client_state* client) {
 }
 
 static void on_write_cb(my_state* state, client_state* client) {
+  ssize_t result;
+  char err_buf[256];
+  size_t n;
+  struct epoll_event event;
   printf("on_write_cb\n");
+
+  for (;;) {
+    n = sizeof(client->wr_buf) - client->wr_offset;
+    if (n > client->wr_len)
+      n = client->wr_len;
+    result = write(client->fd, client->wr_buf + client->wr_offset, n);
+    if (result == -1) {
+      if (errno == EAGAIN || errno == EWOULDBLOCK)
+        return;
+      strerror_r(errno, err_buf, sizeof err_buf);
+      remove_client(state, client, err_buf);
+      return;
+    }
+    assert(result != 0);
+
+    client->wr_len -= (unsigned) result;
+    if (client->wr_len == 0)
+      break;
+    client->wr_offset += (unsigned) result;
+    if (client->wr_offset == sizeof(client->wr_buf))
+        client->wr_offset = 0;
+  }
+
+  client->wr_offset = 0;
+  event.data.ptr = client;
+  event.events = EPOLLIN | EPOLLRDHUP;
+
+  if (epoll_ctl(state->epoll_fd, EPOLL_CTL_MOD, client->fd, &event) == -1) {
+    strerror_r(errno, err_buf, sizeof err_buf);
+    remove_client(state, client, err_buf);
+    return;
+  }
 }
