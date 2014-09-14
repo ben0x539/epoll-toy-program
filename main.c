@@ -166,11 +166,10 @@ static int run_server_loop(my_state* state, const char** err) {
         on_hup_cb(state, client);
       } else if (event.events & EPOLLERR) {
         on_err_cb(state, client);
-      } else {
-        if (event.events & EPOLLIN)
-          on_read_cb(state, client);
-        if (event.events & EPOLLOUT)
-          on_write_cb(state, client);
+      } else if (event.events & EPOLLIN) {
+        on_read_cb(state, client);
+      } else if (event.events & EPOLLOUT) {
+        on_write_cb(state, client);
       }
     }
 
