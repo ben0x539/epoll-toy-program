@@ -375,6 +375,7 @@ static int try_write(my_state* state, client_state* client) {
 static int broadcast_from_rd(my_state* state, client_state* client,
                              const char* msg, size_t len) {
   size_t i;
+  int current_is_sender;
   int result, client_result;
   char buf[sizeof(client->rd_buf)];
   client_state* receiver;
@@ -384,10 +385,12 @@ static int broadcast_from_rd(my_state* state, client_state* client,
   result = 0;
   for (i = 0; i < state->num_clients; ++i) {
     receiver = state->clients[i];
+    /* `client` and `receiver` might be invalidated after send_to */
+    current_is_sender = (receiver == client);
     client_result = send_to(state, receiver, buf, len);
     if (client_result == -1) {
       --i;
-      if (receiver == client)
+      if (current_is_sender)
         result = -1;
     }
   }
