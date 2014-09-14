@@ -285,7 +285,7 @@ static void remove_client(my_state* state, client_state* client,
 
 static int send_to(my_state* state, client_state* client,
                    const char* msg, size_t len) {
-  char err_buf[256];
+  char err_buf[256], * err_msg;
   size_t n;
   size_t off;
   struct epoll_event event;
@@ -326,8 +326,8 @@ static int send_to(my_state* state, client_state* client,
     event.data.ptr = client;
     client->epoll_events = event.events = EPOLLIN | EPOLLRDHUP | EPOLLOUT;
     if (epoll_ctl(state->epoll_fd, EPOLL_CTL_MOD, client->fd, &event) == -1) {
-      strerror_r(errno, err_buf, sizeof err_buf);
-      remove_client(state, client, err_buf);
+      err_msg = strerror_r(errno, err_buf, sizeof err_buf);
+      remove_client(state, client, err_msg);
       return -1;
     }
   } else if (client->wr_len == 0 && (client->epoll_events & EPOLLOUT)) {
@@ -335,8 +335,8 @@ static int send_to(my_state* state, client_state* client,
     event.data.ptr = client;
     client->epoll_events = event.events = EPOLLIN | EPOLLRDHUP;
     if (epoll_ctl(state->epoll_fd, EPOLL_CTL_MOD, client->fd, &event) == -1) {
-      strerror_r(errno, err_buf, sizeof err_buf);
-      remove_client(state, client, err_buf);
+      err_msg = strerror_r(errno, err_buf, sizeof err_buf);
+      remove_client(state, client, err_msg);
       return -1;
     }
   }
@@ -346,7 +346,7 @@ static int send_to(my_state* state, client_state* client,
 
 static int try_write(my_state* state, client_state* client) {
   ssize_t result;
-  char err_buf[256];
+  char err_buf[256], * err_msg;
   size_t n;
 
   n = sizeof(client->wr_buf) - client->wr_offset;
@@ -357,8 +357,8 @@ static int try_write(my_state* state, client_state* client) {
     if (errno == EAGAIN || errno == EWOULDBLOCK)
       return 0;
 
-    strerror_r(errno, err_buf, sizeof err_buf);
-    remove_client(state, client, err_buf);
+    err_msg = strerror_r(errno, err_buf, sizeof err_buf);
+    remove_client(state, client, err_msg);
     return -1;
   }
   assert(result != 0);
@@ -528,53 +528,54 @@ static void on_err_cb(my_state* state, client_state* client) {
 static void on_read_cb(my_state* state, client_state* client) {
   ssize_t result;
   unsigned len;
-  char err_buf[256];
-  char* start, * end, * p;
+  char err_buf[256], * err_msg;
+  char* start, *msg, * end, * p;
   LOG("on_read_cb\n");
 
+  if (client->rd_len == sizeof(client->rd_buf)) {
+    remove_client(state, client, "line too long");
+    return;
+  }
+
+  result = read(client->fd, client->rd_buf + client->rd_len,
+                sizeof(client->rd_buf) - client->rd_len);
+  if (result == -1) {
+    if (errno == EAGAIN || errno == EWOULDBLOCK)
+      return;
+    err_msg = strerror_r(errno, err_buf, sizeof err_buf);
+    remove_client(state, client, err_msg);
+    return;
+  }
+  if (result == 0) {
+    remove_client(state, client, "eof");
+    return;
+  }
+
+  assert(client->rd_len <= sizeof(client->rd_buf));
+  start = client->rd_buf;
+  msg = client->rd_buf + client->rd_len;
+  end = client->rd_buf + client->rd_len + result;
   for (;;) {
-    if (client->rd_len == sizeof(client->rd_buf)) {
-      remove_client(state, client, "line too long");
-      return;
-    }
-
-    result = read(client->fd, client->rd_buf + client->rd_len,
-                  sizeof(client->rd_buf) - client->rd_len);
-    if (result == -1) {
-      if (errno == EAGAIN || errno == EWOULDBLOCK)
-        return;
-      strerror_r(errno, err_buf, sizeof err_buf);
-      remove_client(state, client, err_buf);
-      return;
-    }
-    if (result == 0) {
-      remove_client(state, client, "eof");
-      return;
-    }
-
-    assert(client->rd_len <= sizeof(client->rd_buf));
-    start = client->rd_buf + client->rd_len;
-    end = client->rd_buf + client->rd_len + result;
-    for (;;) {
-      p = memchr(start, '\n', (size_t) (end - start));
-      if (!p)
-        break;
-      len = (unsigned) (p - start);
-      LOG("received from fd %d: %.*s\n",
-          client->fd,
-          (int) len,
-          start);
-      if (broadcast_from_rd(state, client, start, len) == -1)
-        return;
-      start = p + 1;
-    }
+    p = memchr(msg, '\n', (size_t) (end - msg));
+    if (!p)
+      break;
+    len = (unsigned) (p - start);
+    LOG("received from fd %d: %.*s\n",
+        client->fd,
+        (int) len,
+        start);
+    if (broadcast_from_rd(state, client, start, len) == -1)
+      return; /* `client` is invalidated */
+    start = msg = p + 1;
+  }
+  if (start != client->rd_buf) {
     client->rd_len = (unsigned) (end - start);
     memcpy(client->rd_buf, start, client->rd_len);
   }
 }
 
 static void on_write_cb(my_state* state, client_state* client) {
-  char err_buf[256];
+  char err_buf[256], * err_msg;
   struct epoll_event event;
   LOG("on_write_cb\n");
 
@@ -588,8 +589,8 @@ static void on_write_cb(my_state* state, client_state* client) {
   client->epoll_events = event.events = EPOLLIN | EPOLLRDHUP;
 
   if (epoll_ctl(state->epoll_fd, EPOLL_CTL_MOD, client->fd, &event) == -1) {
-    strerror_r(errno, err_buf, sizeof err_buf);
-    remove_client(state, client, err_buf);
+    err_msg = strerror_r(errno, err_buf, sizeof err_buf);
+    remove_client(state, client, err_msg);
     return;
   }
 }
